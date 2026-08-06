@@ -20,8 +20,8 @@ actions:
 
 # Launch the module dataset ONCE (challenge 1): bulk-loads the Mod2/3 logs. The other
 # challenges reuse the same data — no need to re-run per challenge. ILLUMINATE_WAIT is
-# short: Illuminate does not provision the named streams on this VM, so the loader
-# auto-creates them almost immediately instead of waiting the full default.
+# short: provision_lab_streams.py (config.sh step 3a) has already created the named
+# streams at boot, so the loader finds them immediately and never waits the full default.
 - title: Launch Dataset
   shell: GL_API_URL=https://localhost OS_URL=http://localhost:9200 TLS_VERIFY=0 ILLUMINATE_WAIT=15 python3 /opt/lab/scripts/load_lab_data.py
   icon: "&#128229;"
