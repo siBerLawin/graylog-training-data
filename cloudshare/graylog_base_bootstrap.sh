@@ -42,9 +42,19 @@ PASSWORD_SECRET="${PASSWORD_SECRET:-somepasswordpepper}"
 # so existing Academy scripts and content work unchanged (admin / yabba dabba doo).
 ROOT_PASSWORD_SHA2="${ROOT_PASSWORD_SHA2:-941828f6268291fa3aa87a866e8367e609434f42761bdf02dc7fc7958897bae6}"
 
+# The learner browses from a SEPARATE desktop VM, so Graylog must advertise its own
+# internal address, not 127.0.0.1. If it advertises localhost, the UI loads in the
+# learner's browser and then every API call it makes targets the DESKTOP VM instead of
+# Graylog, which presents as a broken Graylog and is not. Auto-detects the primary
+# interface address; override with GL_EXTERNAL_URI if the VM is multi-homed.
+VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+GL_EXTERNAL_URI="${GL_EXTERNAL_URI:-http://${VM_IP}:9000/}"
+
 INSTALL_DIR="/opt/graylog-base"
 
 echo "==> Graylog Base: graylog+datanode ${GL_VER}, mongo ${MONGO_VER}, heaps GL=${GL_HEAP} DN=${DN_HEAP}"
+echo "==> Graylog will advertise itself at ${GL_EXTERNAL_URI}"
+echo "    (this is what the learner's desktop VM browser must be able to reach)"
 
 echo "==> Preflight"
 free -h || true
@@ -124,6 +134,8 @@ services:
       GRAYLOG_PASSWORD_SECRET: "${PASSWORD_SECRET}"
       GRAYLOG_ROOT_PASSWORD_SHA2: "${ROOT_PASSWORD_SHA2}"
       GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
+      GRAYLOG_HTTP_EXTERNAL_URI: "${GL_EXTERNAL_URI}"
+      GRAYLOG_HTTP_PUBLISH_URI: "${GL_EXTERNAL_URI}"
       GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
       # No GRAYLOG_ELASTICSEARCH_HOSTS: with DataNode, Graylog discovers the
       # indexer through MongoDB and authenticates with JWT.
@@ -186,6 +198,7 @@ for i in $(seq 1 60); do
     echo "Memory in use:"
     docker stats --no-stream --format "  {{.Name}}  {{.MemUsage}}  {{.CPUPerc}}" || true
     echo
+    echo "Learner access: point the desktop VM's browser at ${GL_EXTERNAL_URI}"
     echo "NEXT: verify, then snapshot this VM as the 'Graylog Base' blueprint."
     exit 0
   fi
