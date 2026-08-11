@@ -162,7 +162,19 @@ services:
       GRAYLOG_SERVER_JAVA_OPTS: "-Xms${GL_HEAP} -Xmx${GL_HEAP}"
       GRAYLOG_REPORT_DISABLE_SANDBOX: "true"
       GRAYLOG_TELEMETRY_ENABLED: "false"
-      GRAYLOG_HTTP_COOKIE_SAME_SITE_STRICT: "false"
+      # ---------------------------------------------------------------------
+      # Cookie SameSite. Graylog emits its session cookie as SameSite=None when
+      # this is "false". Browsers REJECT SameSite=None unless the cookie is also
+      # Secure, and Secure requires HTTPS. Over plain HTTP that silently drops
+      # the session: the login POST returns 200, the cookie is discarded, every
+      # later call is Unauthorized, and the UI bounces back to a blank login
+      # form with no useful error. The Framework can use "false" because it runs
+      # behind HTTPS.
+      #   Plain HTTP  -> "true"  (SameSite=Strict, cookie is accepted)
+      #   HTTPS       -> "false" is fine, and is REQUIRED if the lab is ever
+      #                  embedded in an iframe (e.g. an LTI launch inside
+      #                  LearnWorlds), because that needs SameSite=None+Secure.
+      GRAYLOG_HTTP_COOKIE_SAME_SITE_STRICT: "${COOKIE_SAME_SITE_STRICT:-true}"
     ports:
       - "${HOST_PORT}:9000/tcp"
       - "5044:5044/tcp"
