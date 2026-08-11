@@ -130,6 +130,11 @@ services:
       mongodb: { condition: "service_started" }
     entrypoint: "/usr/bin/tini --  /docker-entrypoint.sh"
     environment:
+      # Disk guard. Graylog's DEFAULT journal cap is 5gb, which on this 20 GB VM
+      # (18 GB usable) can fill the disk on its own and take Graylog down with
+      # "No space left on device". The Framework's compose caps it at 1gb; we go
+      # lower still because the lab dataset is tiny (4,623 events).
+      GRAYLOG_MESSAGE_JOURNAL_MAX_SIZE: "${JOURNAL_MAX:-512mb}"
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
       GRAYLOG_PASSWORD_SECRET: "${PASSWORD_SECRET}"
       GRAYLOG_ROOT_PASSWORD_SHA2: "${ROOT_PASSWORD_SHA2}"
