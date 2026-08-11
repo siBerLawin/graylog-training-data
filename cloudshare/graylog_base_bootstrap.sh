@@ -202,32 +202,61 @@ docker compose pull
 echo "==> Starting stack"
 docker compose up -d
 
-echo "==> Waiting for Graylog API (up to 5 minutes)"
-for i in $(seq 1 60); do
-  if curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system >/dev/null 2>&1; then
-    echo
-    curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system \
-      | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Graylog UP:", d.get("version"), "| lb:", d.get("lb_status"))' 2>/dev/null || echo "Graylog UP"
-    echo
-    echo "Indexer health (must be green/yellow, NOT unavailable):"
-    curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system/indexer/cluster/health \
-      | python3 -c 'import sys,json; print("  ", json.load(sys.stdin))' 2>/dev/null \
-      || echo "  WARNING: indexer health unreadable. If Graylog is up but this fails, suspect a"
-    echo
-    echo "Memory in use:"
-    docker stats --no-stream --format "  {{.Name}}  {{.MemUsage}}  {{.CPUPerc}}" || true
-    echo
-    echo "NEXT: enable Web Access on this VM in CloudShare, then re-run with"
-    echo "      sudo GL_EXTERNAL_URI=<the CloudShare URL> bash \$0"
-    echo "      so Graylog advertises the proxied URL to the learner's browser."
-    echo "NEXT: verify, then snapshot this VM as the 'Graylog Base' blueprint."
-    exit 0
+echo "==> Waiting for Graylog to settle (this branches: preflight vs ready)"
+# On a FIRST boot with DataNode, Graylog does not start its real API at all: it stands up
+# a preflight configuration service instead and waits for a CA + renewal policy + certs.
+# Polling /api/system for 5 minutes in that state is pointless and reads as a hang, so
+# detect preflight explicitly and say so.
+PREFLIGHT=""
+READY=""
+for i in $(seq 1 36); do
+  if curl -fsS -u 'admin:yabba dabba doo' "http://localhost:${HOST_PORT}/api/system" >/dev/null 2>&1; then
+    READY=1; break
+  fi
+  if docker compose logs graylog 2>/dev/null | grep -q "Initial configuration is accessible"; then
+    PREFLIGHT=1; break
   fi
   sleep 5
 done
 
+if [ -n "${PREFLIGHT}" ]; then
+  echo
+  echo "-----------------------------------------------------------------------"
+  echo "GRAYLOG IS IN PREFLIGHT. This is EXPECTED on a first boot with DataNode."
+  echo "It is not an error and nothing is stuck."
+  echo
+  echo "Graylog will not serve its real API until a certificate authority, a"
+  echo "renewal policy and signed certificates exist. Do that now:"
+  echo
+  echo "    sudo bash graylog_preflight.sh"
+  echo
+  echo "That script is automated and idempotent; it finds the preflight password"
+  echo "itself. Come back here only if it fails."
+  echo "-----------------------------------------------------------------------"
+  exit 0
+fi
+
+if [ -n "${READY}" ]; then
+  echo
+  curl -fsS -u 'admin:yabba dabba doo' "http://localhost:${HOST_PORT}/api/system" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Graylog UP:", d.get("version"), "| lb:", d.get("lb_status"))' 2>/dev/null || echo "Graylog UP"
+  echo
+  echo "Indexer health (must be green/yellow, NOT unavailable):"
+  curl -fsS -u 'admin:yabba dabba doo' "http://localhost:${HOST_PORT}/api/system/indexer/cluster/health" \
+    | python3 -c 'import sys,json; print("  ", json.load(sys.stdin))' 2>/dev/null || echo "  (unreadable)"
+  echo
+  echo "Memory in use:"
+  docker stats --no-stream --format "  {{.Name}}  {{.MemUsage}}  {{.CPUPerc}}" || true
+  echo
+  echo "Advertising: ${GL_EXTERNAL_URI}"
+  echo "NEXT: enable Web Access on this VM in CloudShare, then re-run with"
+  echo "      sudo GL_EXTERNAL_URI=<the CloudShare URL> bash $0"
+  echo "      so Graylog advertises the proxied URL to the learner's browser."
+  exit 0
+fi
+
 echo >&2
-echo "Graylog did not come up in time. Triage in this order:" >&2
+echo "Graylog neither reached preflight nor came up. Triage in this order:" >&2
 echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yml ps" >&2
 echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yml logs --tail=40 graylog" >&2
 echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yml logs --tail=40 datanode" >&2
