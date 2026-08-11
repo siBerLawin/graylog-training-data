@@ -116,15 +116,19 @@ fi
 # ---------------------------------------------------------------------------
 # 6. Wait for the DataNode to leave UNCONFIGURED. This, not the HTTP code, is success.
 # ---------------------------------------------------------------------------
-say "Waiting for DataNode to be configured"
+say "Waiting for DataNode to be READY (not merely out of UNCONFIGURED)"
+# STARTING is transitional. Breaking out on "anything but UNCONFIGURED" calls resume
+# against a DataNode that is still coming up, and the resume endpoints answer 500.
+# Wait for a terminal ready state instead.
 configured=""
-for i in $(seq 1 36); do
+for i in $(seq 1 60); do
   st="$(api "${GL_URL}/api/data_nodes" | grep -o '"datanode_status":"[^"]*"' | head -1 | cut -d'"' -f4)"
   [ -z "${st}" ] && st="$(api "${GL_URL}/api/data_nodes" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)"
   echo "   [$i] ${st:-unknown}"
   case "${st}" in
-    UNCONFIGURED|""|unknown) ;;
-    *) configured="${st}"; break ;;
+    AVAILABLE|CONNECTED|READY|CONFIGURED) configured="${st}"; break ;;
+    UNCONFIGURED|STARTING|""|unknown)     ;;   # keep waiting
+    *) configured="${st}"; break ;;            # unknown terminal state, proceed and report
   esac
   sleep 5
 done
@@ -141,11 +145,27 @@ echo "   DataNode is now: ${configured}"
 # 7. Resume startup. Endpoint name varies; try the candidates.
 # ---------------------------------------------------------------------------
 say "Resuming startup"
-for ep in finish resume status/finish startOver; do
-  c="$(code -X POST "${GL_URL}/api/${ep}" -d '{}')"
-  echo "   POST /api/${ep} -> ${c}"
-  case "${c}" in 200|201|202|204) echo "   accepted via /api/${ep}"; break ;; esac
+# 500 here usually means "called too early", not "wrong endpoint" (a wrong path 404s).
+# Retry a few times, since DataNode may still be settling even after reporting ready.
+resumed=""
+for attempt in 1 2 3; do
+  for ep in finish resume startOver; do
+    c="$(code -X POST "${GL_URL}/api/${ep}" -d '{}')"
+    echo "   [try ${attempt}] POST /api/${ep} -> ${c}"
+    case "${c}" in
+      200|201|202|204) resumed="${ep}"; break ;;
+    esac
+  done
+  [ -n "${resumed}" ] && { echo "   accepted via /api/${resumed}"; break; }
+  # Maybe Graylog resumed on its own once certs existed.
+  if curl -fsS -u "admin:${ADMIN_PASS}" "${GL_URL}/api/system" >/dev/null 2>&1; then
+    echo "   Graylog is already serving its real API; no resume needed."
+    resumed="auto"; break
+  fi
+  echo "   none accepted, waiting 20s before retrying"
+  sleep 20
 done
+[ -z "${resumed}" ] && echo "   WARNING: no resume endpoint accepted. Graylog may still come up on its own." 
 
 # ---------------------------------------------------------------------------
 # 8. Wait for the real Graylog server (preflight hands over on the same port)
