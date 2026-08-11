@@ -42,19 +42,33 @@ PASSWORD_SECRET="${PASSWORD_SECRET:-somepasswordpepper}"
 # so existing Academy scripts and content work unchanged (admin / yabba dabba doo).
 ROOT_PASSWORD_SHA2="${ROOT_PASSWORD_SHA2:-941828f6268291fa3aa87a866e8367e609434f42761bdf02dc7fc7958897bae6}"
 
-# The learner browses from a SEPARATE desktop VM, so Graylog must advertise its own
-# internal address, not 127.0.0.1. If it advertises localhost, the UI loads in the
-# learner's browser and then every API call it makes targets the DESKTOP VM instead of
-# Graylog, which presents as a broken Graylog and is not. Auto-detects the primary
-# interface address; override with GL_EXTERNAL_URI if the VM is multi-homed.
+# ---------------------------------------------------------------------------
+# CloudShare Web Access: publish on an ALLOWED port.
+# Web Access gives the environment a static, shareable URL so a learner opens
+# Graylog in their own browser (the same shape as Instruqt's tab, and it removes
+# any need for a learner desktop VM). It only proxies these ports:
+#   80, 443, 3695, 8000-8010, 8080, 8180, 8280, 8360, 8365, 8585, 8443-8449
+# Graylog's default 9000 is NOT among them, so the container's 9000 is published
+# on the host as 8080.
+HOST_PORT="${HOST_PORT:-8080}"
+
+# Graylog must advertise the URL the BROWSER uses, not its own address. Behind the
+# Web Access proxy the page would otherwise load and then send every API call to the
+# wrong host, which looks like a broken Graylog and is not. Same reason the Framework
+# sets GLEURI=https://$dns.logfather.org/ in docker_graylog_https.sh.
+#   1. Once Web Access is enabled, RE-RUN with the CloudShare URL:
+#        sudo GL_EXTERNAL_URI=https://xxxx.cloudshare.com/ bash graylog_base_bootstrap.sh
+#   2. Until then it advertises the VM's own address on HOST_PORT, which is fine
+#      for curl and for a browser on the same internal network.
 VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-GL_EXTERNAL_URI="${GL_EXTERNAL_URI:-http://${VM_IP}:9000/}"
+GL_EXTERNAL_URI="${GL_EXTERNAL_URI:-http://${VM_IP}:${HOST_PORT}/}"
 
 INSTALL_DIR="/opt/graylog-base"
 
 echo "==> Graylog Base: graylog+datanode ${GL_VER}, mongo ${MONGO_VER}, heaps GL=${GL_HEAP} DN=${DN_HEAP}"
+echo "==> Publishing Graylog on host port ${HOST_PORT} (CloudShare Web Access allows"
+echo "    80, 443, 3695, 8000-8010, 8080, 8180, 8280, 8360, 8365, 8585, 8443-8449; NOT 9000)"
 echo "==> Graylog will advertise itself at ${GL_EXTERNAL_URI}"
-echo "    (this is what the learner's desktop VM browser must be able to reach)"
 
 echo "==> Preflight"
 free -h || true
@@ -150,7 +164,7 @@ services:
       GRAYLOG_TELEMETRY_ENABLED: "false"
       GRAYLOG_HTTP_COOKIE_SAME_SITE_STRICT: "false"
     ports:
-      - "9000:9000/tcp"
+      - "${HOST_PORT}:9000/tcp"
       - "5044:5044/tcp"
       - "12201:12201/tcp"
       - "12201:12201/udp"
@@ -190,20 +204,22 @@ docker compose up -d
 
 echo "==> Waiting for Graylog API (up to 5 minutes)"
 for i in $(seq 1 60); do
-  if curl -fsS -u 'admin:yabba dabba doo' http://localhost:9000/api/system >/dev/null 2>&1; then
+  if curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system >/dev/null 2>&1; then
     echo
-    curl -fsS -u 'admin:yabba dabba doo' http://localhost:9000/api/system \
+    curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system \
       | python3 -c 'import sys,json; d=json.load(sys.stdin); print("Graylog UP:", d.get("version"), "| lb:", d.get("lb_status"))' 2>/dev/null || echo "Graylog UP"
     echo
     echo "Indexer health (must be green/yellow, NOT unavailable):"
-    curl -fsS -u 'admin:yabba dabba doo' http://localhost:9000/api/system/indexer/cluster/health \
+    curl -fsS -u 'admin:yabba dabba doo' http://localhost:${HOST_PORT}/api/system/indexer/cluster/health \
       | python3 -c 'import sys,json; print("  ", json.load(sys.stdin))' 2>/dev/null \
       || echo "  WARNING: indexer health unreadable. If Graylog is up but this fails, suspect a"
     echo
     echo "Memory in use:"
     docker stats --no-stream --format "  {{.Name}}  {{.MemUsage}}  {{.CPUPerc}}" || true
     echo
-    echo "Learner access: point the desktop VM's browser at ${GL_EXTERNAL_URI}"
+    echo "NEXT: enable Web Access on this VM in CloudShare, then re-run with"
+    echo "      sudo GL_EXTERNAL_URI=<the CloudShare URL> bash \$0"
+    echo "      so Graylog advertises the proxied URL to the learner's browser."
     echo "NEXT: verify, then snapshot this VM as the 'Graylog Base' blueprint."
     exit 0
   fi

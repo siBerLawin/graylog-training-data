@@ -23,7 +23,8 @@
 set -euo pipefail
 
 COMPOSE_DIR="${COMPOSE_DIR:-/opt/graylog-base}"
-GL_URL="${GL_URL:-http://localhost:9000}"
+HOST_PORT="${HOST_PORT:-8080}"
+GL_URL="${GL_URL:-http://localhost:${HOST_PORT}}"
 ORG_NAME="${ORG_NAME:-Graylog Academy}"
 CERT_LIFETIME="${CERT_LIFETIME:-P365D}"
 ADMIN_PASS="${ADMIN_PASS:-yabba dabba doo}"   # the real admin password, post-preflight
