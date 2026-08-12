@@ -12,8 +12,16 @@
 # lives in git, the image stays reproducible from source anyway.
 #
 # WHAT IT DOES NOT DO (deliberately, later layers)
-#   - no HTTPS / certs, no Illuminate, no licenses, no OliveTin, no module content.
-# Goal: Graylog reachable on :9000 with a working indexer. Snapshot after that.
+#   - no Illuminate, no licenses, no OliveTin, no module content.
+# Goal: Graylog reachable over HTTP and HTTPS with a working indexer. Snapshot after that.
+#
+# HTTPS (added 2026-08-12, measured)
+# CloudShare's Web Access edge terminates TLS for the learner and then reconnects to the
+# VM ON PORT 443, EXPECTING TLS THERE. With nothing on 443 the HTTPS URL returns a
+# "machineNotResponding" redirect while HTTP works, which reads like a CloudShare bug and
+# is not. An nginx sidecar on 443 fixes it. CloudShare does NOT validate the origin
+# certificate, so a self-signed one is fine and the same baked-in cert works for every
+# clone regardless of hostname. The learner sees CloudShare's own trusted certificate.
 #
 # USAGE
 #   sudo bash graylog_base_bootstrap.sh
@@ -50,7 +58,11 @@ ROOT_PASSWORD_SHA2="${ROOT_PASSWORD_SHA2:-941828f6268291fa3aa87a866e8367e609434f
 #   80, 443, 3695, 8000-8010, 8080, 8180, 8280, 8360, 8365, 8585, 8443-8449
 # Graylog's default 9000 is NOT among them, so the container's 9000 is published
 # on the host as 8080.
-HOST_PORT="${HOST_PORT:-8080}"
+HOST_PORT="${HOST_PORT:-80}"
+
+# TLS sidecar. nginx on 443 terminating with a self-signed cert and proxying to Graylog.
+# Set TLS_ENABLE=0 to skip it (HTTP only, which the HTTPS Web Access URL will NOT serve).
+TLS_ENABLE="${TLS_ENABLE:-1}"
 
 # Graylog must advertise the URL the BROWSER uses, not its own address. Behind the
 # Web Access proxy the page would otherwise load and then send every API call to the
@@ -60,6 +72,12 @@ HOST_PORT="${HOST_PORT:-8080}"
 #        sudo GL_EXTERNAL_URI=https://xxxx.cloudshare.com/ bash graylog_base_bootstrap.sh
 #   2. Until then it advertises the VM's own address on HOST_PORT, which is fine
 #      for curl and for a browser on the same internal network.
+#
+# ⚠ THIS VALUE CANNOT BE BAKED INTO THE BLUEPRINT. Every clone gets a DIFFERENT Web Access
+# hostname, so a snapshotted URI would send every learner's browser to someone else's URL.
+# Per-learner provisioning must set it after cloning:
+#     python3 scripts/cloudshare_set_external_uri.py <envId>
+# which reads the environment's own webAccessUrl and applies it over executepath.
 VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 GL_EXTERNAL_URI="${GL_EXTERNAL_URI:-http://${VM_IP}:${HOST_PORT}/}"
 
@@ -97,6 +115,65 @@ grep -q "^vm.max_map_count" /etc/sysctl.conf || echo "vm.max_map_count=262144" >
 
 echo "==> Writing compose to ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
+
+# ---------------------------------------------------------------------------
+# TLS sidecar: self-signed cert + nginx on 443 -> graylog:9000.
+# The certificate's CN is deliberately generic. CloudShare does not validate the
+# origin certificate, so ONE cert baked into the snapshot serves every clone no
+# matter what hostname it gets. Proxying to the container by service name keeps
+# this working regardless of the VM's IP after a clone.
+# ---------------------------------------------------------------------------
+TLS_SERVICE=""
+if [ "${TLS_ENABLE}" = "1" ]; then
+  mkdir -p "${INSTALL_DIR}/certs"
+  if [ ! -f "${INSTALL_DIR}/certs/cert.pem" ]; then
+    echo "==> Generating self-signed certificate for the TLS sidecar"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout "${INSTALL_DIR}/certs/key.pem" \
+      -out "${INSTALL_DIR}/certs/cert.pem" \
+      -subj "/CN=graylog-lab" -addext "subjectAltName=DNS:graylog-lab" >/dev/null 2>&1
+  fi
+  cat > "${INSTALL_DIR}/nginx.conf" <<'NGINX'
+events {}
+http {
+  # Large enough for Graylog's API responses and long query strings.
+  client_max_body_size 64m;
+  server {
+    listen 443 ssl;
+    ssl_certificate     /etc/nginx/certs/cert.pem;
+    ssl_certificate_key /etc/nginx/certs/key.pem;
+    location / {
+      proxy_pass http://graylog:9000;
+      proxy_set_header Host              $host;
+      proxy_set_header X-Real-IP         $remote_addr;
+      proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto https;
+      # Graylog's UI uses websockets in places; without these they fail silently.
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade    $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_read_timeout 300s;
+    }
+  }
+}
+NGINX
+  TLS_SERVICE='
+  tls:
+    image: "nginx:alpine"
+    depends_on:
+      graylog: { condition: "service_started" }
+    ports:
+      - "443:443/tcp"
+    volumes:
+      - "/opt/graylog-base/nginx.conf:/etc/nginx/nginx.conf:ro"
+      - "/opt/graylog-base/certs:/etc/nginx/certs:ro"
+    networks: [graylog_net]
+    logging:
+      driver: "json-file"
+      options: { max-size: "10m", max-file: "3" }
+    restart: "unless-stopped"
+'
+fi
 cat > "${INSTALL_DIR}/docker-compose.yml" <<COMPOSE
 services:
   mongodb:
@@ -108,7 +185,7 @@ services:
     logging:
       driver: "json-file"
       options: { max-size: "10m", max-file: "3" }
-    restart: "on-failure"
+    restart: "unless-stopped"
 
   datanode:
     image: "graylog/graylog-datanode:${GL_VER}"
@@ -135,7 +212,7 @@ services:
     volumes:
       - "graylog_datanode_os:/usr/share/opensearch/data"
       - "graylog_datanode:/var/lib/graylog-datanode"
-    restart: "on-failure"
+    restart: "unless-stopped"
 
   graylog:
     hostname: "graylog"
@@ -192,8 +269,8 @@ services:
       - "graylog_config:/usr/share/graylog/data/config"
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
-    restart: "on-failure"
-
+    restart: "unless-stopped"
+${TLS_SERVICE}
 networks:
   graylog_net:
     driver: "bridge"
@@ -260,6 +337,12 @@ if [ -n "${READY}" ]; then
   echo "Memory in use:"
   docker stats --no-stream --format "  {{.Name}}  {{.MemUsage}}  {{.CPUPerc}}" || true
   echo
+  if [ "${TLS_ENABLE}" = "1" ]; then
+    echo "TLS sidecar (must be 200, or the HTTPS Web Access URL will not serve):"
+    echo -n "   https://localhost/ -> "
+    curl -sk -o /dev/null -w "%{http_code}\n" https://localhost/ || echo "FAILED"
+    echo
+  fi
   echo "Advertising: ${GL_EXTERNAL_URI}"
   echo "NEXT: enable Web Access on this VM in CloudShare, then re-run with"
   echo "      sudo GL_EXTERNAL_URI=<the CloudShare URL> bash $0"
